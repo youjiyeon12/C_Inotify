@@ -588,8 +588,7 @@ void MainWindow::refreshStatus() {
             it->setData(KindRole, statusKind(c.status));
             bool again = c.status == 'M' && recreated_.contains(q(c.path));
             it->setData(PillRole, again ? QString("다시 만듦") : statusText(c.status));
-            if (again) it->setToolTip(q(c.path) + " — 기준 이후 지웠다가 같은 이름으로 다시 만들었어요");
-            it->setToolTip(q(c.path));
+            it->setToolTip(again ? q(c.path) + " — 기준 이후 지웠다가 같은 이름으로 다시 만들었어요" : q(c.path));
             changes_->addItem(it);
             if (q(c.path) == keep) changes_->setCurrentRow(changes_->count() - 1);
         }
