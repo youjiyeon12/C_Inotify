@@ -90,6 +90,8 @@ int main() {
     put(dir / "big.bin", std::string(Tracker::kMaxKeep + 1, 'x'));
     r.resetBaseline();
     CHECK(!r.before("big.bin"));  // 너무 큰 파일은 내용을 안 담아 둔다
+    CHECK(!r.working("big.bin"));  // 지금 내용도 통째로 읽지 않는다 (화면 멈춤 방지)
+    CHECK(r.working("a.txt").value_or("") == "one\n2\n");
     fs::remove(dir / "big.bin");
     r.resetBaseline();
 

@@ -6,6 +6,7 @@
 #include <QDateTime>
 #include <QDir>
 #include <QFileDialog>
+#include <QFileInfo>
 #include <QFontDatabase>
 #include <QHBoxLayout>
 #include <QLabel>
@@ -622,6 +623,12 @@ void MainWindow::renderDiff(const std::string& rel, char status, const std::opti
     QTextEdit* view = diffView_;
     if (!rel.empty() && rel.back() == '/') return showNote(view, status == 'A' ? "새 폴더" : "삭제된 폴더");
     if (status != 'A' && !before) return showNote(view, "1MB가 넘는 파일은 줄 비교를 하지 않아요.");
+    if (status != 'D' && !after) {  // 지금 파일이 너무 크거나, 그 사이 지워져서 못 읽음
+        QFileInfo fi(QDir(q(tracker_.root())).filePath(q(rel)));
+        return showNote(view, fi.exists() && fi.size() > qint64(Tracker::kMaxKeep)
+                                  ? QString("1MB가 넘는 파일은 줄 비교를 하지 않아요.")
+                                  : QString("파일을 읽을 수 없어요."));
+    }
     std::string a = before.value_or(""), b = after.value_or("");
     if (Tracker::isBinary(a) || Tracker::isBinary(b))
         return showNote(view, QString("바이너리 파일 (%1 → %2 바이트)").arg(a.size()).arg(b.size()));
@@ -640,7 +647,21 @@ void MainWindow::renderDiff(const std::string& rel, char status, const std::opti
     cur.insertText(q(rel) + QString("    +%1  −%2").arg(added).arg(removed) +
                    (added + removed == 0 ? "   (내용 같음)" : ""));
     cf.setFontWeight(QFont::Normal);
+    // 줄이 아주 많으면 앞부분만 그린다 (한 줄씩 넣는 게 느려서 화면이 멈춘다)
+    constexpr size_t kMaxShownLines = 3000;
+    if (lines.size() > kMaxShownLines) {
+        size_t hidden = lines.size() - kMaxShownLines;
+        lines.resize(kMaxShownLines);
+        lines.push_back({'.', QString("… 나머지 %1줄은 생략했어요").arg(hidden).toStdString()});
+    }
     for (auto& l : lines) {
+        if (l.op == '.') {
+            bf.setBackground(Qt::white);
+            cf.setForeground(kMuted);
+            cur.insertBlock(bf, cf);
+            cur.insertText(q(l.text));
+            continue;
+        }
         bool add = l.op == '+', del = l.op == '-';
         bf.setBackground(add ? QColor("#E7F6EC") : del ? QColor("#FDECEC") : QColor(Qt::white));
         cf.setForeground(add ? QColor("#1E7A3C") : del ? QColor("#B03A37") : kInk);
