@@ -6,6 +6,7 @@
 #include <QDateTime>
 #include <QDir>
 #include <QFileDialog>
+#include <QFileInfo>
 #include <QFontDatabase>
 #include <QHBoxLayout>
 #include <QLabel>
@@ -259,13 +260,23 @@ void showNote(QTextEdit* view, const QString& text) {
     view->setHtml("<p style='color:#8A7A6E; margin:18px'>" + text.toHtmlEscaped() + "</p>");
 }
 
+// 같은 폴더 안에서 이름만 바뀐 이동인지 (inotify에는 둘 다 MOVED_FROM/TO 한 쌍으로 온다)
+bool isRename(const FsEvent& e) {
+    auto parent = [](const std::string& p) {
+        auto slash = p.rfind('/');
+        return slash == std::string::npos ? std::string() : p.substr(0, slash);
+    };
+    return e.kind == EventKind::Moved && parent(e.fromPath) == parent(e.path);
+}
+
 QString bubbleFor(const FsEvent& e) {
     QString name = (e.isDir ? "폴더 " : "") + shortName(e.path);
     switch (e.kind) {
         case EventKind::Created: return name + " 새로 생겼어!";
         case EventKind::Modified: return name + " 고쳐졌어!";
         case EventKind::Deleted: return name + " 사라졌어…";
-        case EventKind::Moved: return shortName(e.fromPath) + " → " + shortName(e.path) + " 이사 완료!";
+        case EventKind::Moved:
+            return shortName(e.fromPath) + " → " + shortName(e.path) + (isRename(e) ? " 이름 바꿨어!" : " 이사 완료!");
         default: return "";
     }
 }
@@ -288,7 +299,7 @@ MainWindow::MainWindow(QWidget* parent)
     lay->addWidget(buildBar());
 
     // 페이지 1: 실시간 목록
-    events_ = makeList("실시간 이벤트 목록", 64);
+    events_ = makeList("실시간 이벤트 목록", 84);  // "이름 변경"이 들어가는 폭
     // 페이지 2: 바뀐 파일 + 바뀐 줄
     changes_ = makeList("바뀐 파일 목록", 96);
     connect(changes_, &QListWidget::currentRowChanged, this, &MainWindow::showChangeDiff);
@@ -525,7 +536,7 @@ void MainWindow::onInotifyReady() {
             continue;
         }
         QString text = e.kind == EventKind::Moved ? q(e.fromPath) + "  →  " + q(e.path) : q(e.path);
-        addEventRow(now, int(e.kind), e.isDir, text);
+        addEventRow(now, int(e.kind), e.isDir, text, isRename(e) ? QString("이름 변경") : QString(kKindName[int(e.kind)]));
         // 기준 이후 지웠다가 같은 이름으로 다시 만든 파일을 기억 (변경사항에 "다시 만듦"으로 표시)
         QString path = q(e.path);
         if (e.kind == EventKind::Deleted || (e.kind == EventKind::Moved && !e.fromPath.empty()))
@@ -541,11 +552,11 @@ void MainWindow::onInotifyReady() {
     if (watcher_.hasPending()) QTimer::singleShot(2100, this, [this] { if (watching()) onInotifyReady(); });
 }
 
-void MainWindow::addEventRow(qint64 when, int kind, bool isDir, const QString& text) {
+void MainWindow::addEventRow(qint64 when, int kind, bool isDir, const QString& text, const QString& pill) {
     if (events_->count() == 1 && isPlaceholder(events_->item(0))) events_->clear();
     auto* it = new QListWidgetItem((isDir ? "[폴더] " : "") + text);
     it->setData(KindRole, kind);
-    it->setData(PillRole, QString(kKindName[kind]));
+    it->setData(PillRole, pill);
     it->setData(TimeRole, QDateTime::fromSecsSinceEpoch(when).toString("HH:mm:ss"));
     it->setToolTip(text);
     events_->insertItem(0, it);
@@ -578,8 +589,7 @@ void MainWindow::refreshStatus() {
             it->setData(KindRole, statusKind(c.status));
             bool again = c.status == 'M' && recreated_.contains(q(c.path));
             it->setData(PillRole, again ? QString("다시 만듦") : statusText(c.status));
-            if (again) it->setToolTip(q(c.path) + " — 기준 이후 지웠다가 같은 이름으로 다시 만들었어요");
-            it->setToolTip(q(c.path));
+            it->setToolTip(again ? q(c.path) + " — 기준 이후 지웠다가 같은 이름으로 다시 만들었어요" : q(c.path));
             changes_->addItem(it);
             if (q(c.path) == keep) changes_->setCurrentRow(changes_->count() - 1);
         }
@@ -613,6 +623,12 @@ void MainWindow::renderDiff(const std::string& rel, char status, const std::opti
     QTextEdit* view = diffView_;
     if (!rel.empty() && rel.back() == '/') return showNote(view, status == 'A' ? "새 폴더" : "삭제된 폴더");
     if (status != 'A' && !before) return showNote(view, "1MB가 넘는 파일은 줄 비교를 하지 않아요.");
+    if (status != 'D' && !after) {  // 지금 파일이 너무 크거나, 그 사이 지워져서 못 읽음
+        QFileInfo fi(QDir(q(tracker_.root())).filePath(q(rel)));
+        return showNote(view, fi.exists() && fi.size() > qint64(Tracker::kMaxKeep)
+                                  ? QString("1MB가 넘는 파일은 줄 비교를 하지 않아요.")
+                                  : QString("파일을 읽을 수 없어요."));
+    }
     std::string a = before.value_or(""), b = after.value_or("");
     if (Tracker::isBinary(a) || Tracker::isBinary(b))
         return showNote(view, QString("바이너리 파일 (%1 → %2 바이트)").arg(a.size()).arg(b.size()));
@@ -631,7 +647,21 @@ void MainWindow::renderDiff(const std::string& rel, char status, const std::opti
     cur.insertText(q(rel) + QString("    +%1  −%2").arg(added).arg(removed) +
                    (added + removed == 0 ? "   (내용 같음)" : ""));
     cf.setFontWeight(QFont::Normal);
+    // 줄이 아주 많으면 앞부분만 그린다 (한 줄씩 넣는 게 느려서 화면이 멈춘다)
+    constexpr size_t kMaxShownLines = 3000;
+    if (lines.size() > kMaxShownLines) {
+        size_t hidden = lines.size() - kMaxShownLines;
+        lines.resize(kMaxShownLines);
+        lines.push_back({'.', QString("… 나머지 %1줄은 생략했어요").arg(hidden).toStdString()});
+    }
     for (auto& l : lines) {
+        if (l.op == '.') {
+            bf.setBackground(Qt::white);
+            cf.setForeground(kMuted);
+            cur.insertBlock(bf, cf);
+            cur.insertText(q(l.text));
+            continue;
+        }
         bool add = l.op == '+', del = l.op == '-';
         bf.setBackground(add ? QColor("#E7F6EC") : del ? QColor("#FDECEC") : QColor(Qt::white));
         cf.setForeground(add ? QColor("#1E7A3C") : del ? QColor("#B03A37") : kInk);

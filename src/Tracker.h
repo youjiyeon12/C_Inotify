@@ -32,6 +32,7 @@ public:
     std::vector<FileChange> status() const;  // 기준 대비 지금 바뀐 것
     // 기준 때 내용. 폴더이거나 기준에 없거나 너무 커서 안 담아 둔 파일이면 nullopt
     std::optional<std::string> before(const std::string& rel) const;
+    // 지금 내용. 폴더이거나 없거나 kMaxKeep보다 큰 파일이면 nullopt
     std::optional<std::string> working(const std::string& rel) const;
 
     static std::vector<FileChange> changes(const Snapshot& from, const Snapshot& to);

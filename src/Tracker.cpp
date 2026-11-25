@@ -127,6 +127,10 @@ std::optional<std::string> Tracker::before(const std::string& rel) const {
 
 std::optional<std::string> Tracker::working(const std::string& rel) const {
     if (!rel.empty() && rel.back() == '/') return std::nullopt;
+    // 큰 파일(로그 등)은 통째로 읽지 않는다: 읽고 줄 비교를 그리느라 화면이 멈춘다
+    std::error_code ec;
+    auto size = fs::file_size(root_ / rel, ec);
+    if (ec || size > kMaxKeep) return std::nullopt;
     return readFile(root_ / rel);
 }
 
