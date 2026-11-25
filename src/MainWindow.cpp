@@ -259,13 +259,23 @@ void showNote(QTextEdit* view, const QString& text) {
     view->setHtml("<p style='color:#8A7A6E; margin:18px'>" + text.toHtmlEscaped() + "</p>");
 }
 
+// 같은 폴더 안에서 이름만 바뀐 이동인지 (inotify에는 둘 다 MOVED_FROM/TO 한 쌍으로 온다)
+bool isRename(const FsEvent& e) {
+    auto parent = [](const std::string& p) {
+        auto slash = p.rfind('/');
+        return slash == std::string::npos ? std::string() : p.substr(0, slash);
+    };
+    return e.kind == EventKind::Moved && parent(e.fromPath) == parent(e.path);
+}
+
 QString bubbleFor(const FsEvent& e) {
     QString name = (e.isDir ? "폴더 " : "") + shortName(e.path);
     switch (e.kind) {
         case EventKind::Created: return name + " 새로 생겼어!";
         case EventKind::Modified: return name + " 고쳐졌어!";
         case EventKind::Deleted: return name + " 사라졌어…";
-        case EventKind::Moved: return shortName(e.fromPath) + " → " + shortName(e.path) + " 이사 완료!";
+        case EventKind::Moved:
+            return shortName(e.fromPath) + " → " + shortName(e.path) + (isRename(e) ? " 이름 바꿨어!" : " 이사 완료!");
         default: return "";
     }
 }
@@ -288,7 +298,7 @@ MainWindow::MainWindow(QWidget* parent)
     lay->addWidget(buildBar());
 
     // 페이지 1: 실시간 목록
-    events_ = makeList("실시간 이벤트 목록", 64);
+    events_ = makeList("실시간 이벤트 목록", 84);  // "이름 변경"이 들어가는 폭
     // 페이지 2: 바뀐 파일 + 바뀐 줄
     changes_ = makeList("바뀐 파일 목록", 96);
     connect(changes_, &QListWidget::currentRowChanged, this, &MainWindow::showChangeDiff);
@@ -525,7 +535,7 @@ void MainWindow::onInotifyReady() {
             continue;
         }
         QString text = e.kind == EventKind::Moved ? q(e.fromPath) + "  →  " + q(e.path) : q(e.path);
-        addEventRow(now, int(e.kind), e.isDir, text);
+        addEventRow(now, int(e.kind), e.isDir, text, isRename(e) ? QString("이름 변경") : QString(kKindName[int(e.kind)]));
         // 기준 이후 지웠다가 같은 이름으로 다시 만든 파일을 기억 (변경사항에 "다시 만듦"으로 표시)
         QString path = q(e.path);
         if (e.kind == EventKind::Deleted || (e.kind == EventKind::Moved && !e.fromPath.empty()))
@@ -541,11 +551,11 @@ void MainWindow::onInotifyReady() {
     if (watcher_.hasPending()) QTimer::singleShot(2100, this, [this] { if (watching()) onInotifyReady(); });
 }
 
-void MainWindow::addEventRow(qint64 when, int kind, bool isDir, const QString& text) {
+void MainWindow::addEventRow(qint64 when, int kind, bool isDir, const QString& text, const QString& pill) {
     if (events_->count() == 1 && isPlaceholder(events_->item(0))) events_->clear();
     auto* it = new QListWidgetItem((isDir ? "[폴더] " : "") + text);
     it->setData(KindRole, kind);
-    it->setData(PillRole, QString(kKindName[kind]));
+    it->setData(PillRole, pill);
     it->setData(TimeRole, QDateTime::fromSecsSinceEpoch(when).toString("HH:mm:ss"));
     it->setToolTip(text);
     events_->insertItem(0, it);

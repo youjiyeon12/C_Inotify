@@ -48,6 +48,8 @@ void Watcher::stop() {
     if (fd_ >= 0) close(fd_);  // 닫으면 커널이 watch를 전부 정리한다
     fd_ = -1;
     wdPath_.clear();
+    files_.clear();
+    replacing_.clear();
 }
 
 std::string Watcher::takeError() {
@@ -84,6 +86,7 @@ bool Watcher::addRecursive(const std::string& absDir, std::vector<FsEvent>* foun
         bool dir = it->symlink_status(sec).type() == fs::file_type::directory;
         if (found) found->push_back({EventKind::Created, r, "", dir});
         if (dir) addRecursive(abs, found);  // 하위 폴더 실패는 건너뛰고 계속
+        else files_.insert(r);
     }
     return true;
 }
@@ -105,6 +108,26 @@ void Watcher::forgetDir(const std::string& abs) {
     }
 }
 
+void Watcher::renameKnown(const std::string& fromRel, const std::string& toRel) {
+    std::vector<std::string> moved;
+    for (auto it = files_.begin(); it != files_.end();) {
+        if (underDir(*it, fromRel)) {
+            moved.push_back(toRel + it->substr(fromRel.size()));
+            it = files_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    files_.insert(moved.begin(), moved.end());
+}
+
+void Watcher::forgetKnown(const std::string& r) {
+    for (auto it = files_.begin(); it != files_.end();) {
+        if (underDir(*it, r)) it = files_.erase(it);
+        else ++it;
+    }
+}
+
 bool Watcher::isFreshTemp(const std::string& rel, const std::vector<FsEvent>& batch) const {
     for (auto& e : batch)
         if (e.path == rel && e.kind == EventKind::Created) return true;
@@ -120,6 +143,7 @@ std::vector<FsEvent> Watcher::readEvents() {
     for (auto it = replacing_.begin(); it != replacing_.end();) {
         if (now - it->second > std::chrono::seconds(2)) {
             out.push_back({EventKind::Deleted, it->first, "", false});
+            files_.erase(it->first);
             it = replacing_.erase(it);
         } else {
             ++it;
@@ -169,25 +193,32 @@ std::vector<FsEvent> Watcher::readEvents() {
                     FsEvent e = from->second;
                     pendingFrom.erase(from);
                     e.path = r;
-                    // 임시 파일에 쓰고 진짜 이름으로 바꿔치기(sed -i, 여러 편집기의 저장)는 "수정" 한 번으로 보인다
-                    if (!isDir && isFreshTemp(e.fromPath, out)) {
+                    // 임시 파일에 쓰고 "이미 있던" 진짜 이름으로 바꿔치기(sed -i, 여러 편집기의 저장)는 "수정" 한 번으로 보인다.
+                    // 새 이름으로 바꾼 것(방금 만든 파일이라도)은 그냥 이동이다
+                    if (!isDir && files_.count(r) && isFreshTemp(e.fromPath, out)) {
                         out.erase(std::remove_if(out.begin(), out.end(),
                                                  [&](const FsEvent& x) { return x.path == e.fromPath; }),
                                   out.end());
+                        files_.erase(e.fromPath);
                         out.push_back({EventKind::Modified, r, "", false});
                         continue;
                     }
                     if (isDir) {
                         renameDir(absOf(e.fromPath), abs);
+                        renameKnown(e.fromPath, r);
                         // 원래 폴더에 watch를 걸기 전에 옮겨졌으면 새 이름으로 건다
                         bool watched = std::any_of(wdPath_.begin(), wdPath_.end(),
                                                    [&](auto& kv) { return kv.second == abs; });
                         if (!watched) addRecursive(abs, nullptr);
+                    } else {
+                        files_.erase(e.fromPath);
+                        files_.insert(r);
                     }
                     out.push_back(e);
                 } else {  // 바깥에서 들어온 것 = 새로 생김
                     out.push_back({EventKind::Created, r, "", isDir});
                     if (isDir) addRecursive(abs, &out);
+                    else files_.insert(r);
                 }
             } else if (ev->mask & IN_CREATE) {
                 if (!isDir && replacing_.count(r)) continue;  // 저장 중 다시 만들어진 원본: 닫힐 때 "수정"으로 알린다
@@ -195,7 +226,9 @@ std::vector<FsEvent> Watcher::readEvents() {
                 lastCreated_ = lastCreatedEver_ = r;
                 lastCreatedAt_ = std::chrono::steady_clock::now();
                 if (isDir) addRecursive(abs, &out);
+                else files_.insert(r);
             } else if (ev->mask & IN_DELETE) {
+                forgetKnown(r);
                 out.push_back({EventKind::Deleted, r, "", isDir});
             } else if (ev->mask & IN_CLOSE_WRITE) {
                 if (replacing_.erase(r)) {  // 백업 후 새로 쓴 원본 = 수정
@@ -219,6 +252,7 @@ std::vector<FsEvent> Watcher::readEvents() {
     // shortcut: 짝이 같은 read 묶음에 안 오면 (트리 밖으로 나간 것으로 보고) 삭제 처리. 드물게 이동이 삭제+생성으로 보일 수 있음
     for (auto& [cookie, e] : pendingFrom) {
         if (e.isDir) forgetDir(absOf(e.fromPath));
+        forgetKnown(e.fromPath);
         out.push_back({EventKind::Deleted, e.fromPath, "", e.isDir});
     }
     return out;

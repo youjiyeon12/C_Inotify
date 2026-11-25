@@ -37,7 +37,7 @@ private:
     void startWatch();
     void stopWatch();
     bool watching() const { return watcher_.fd() >= 0; }
-    void addEventRow(qint64 when, int kind, bool isDir, const QString& text);
+    void addEventRow(qint64 when, int kind, bool isDir, const QString& text, const QString& pill);
     void applyFilter();
 
     void refreshStatus();

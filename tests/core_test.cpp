@@ -175,6 +175,46 @@ int main() {
     put(dir / "quick2/in.txt", "q");
     CHECK(hasEv(drain(w), EventKind::Created, "quick2/in.txt"));
 
+    // 방금 만든 파일을 "새 이름"으로 바꾸면 수정이 아니라 이동 (바꿔치기 저장과 헷갈리면 안 됨)
+    put(dir / "notes.txt", "hi");
+    drain(w);
+    fs::rename(dir / "notes.txt", dir / "notes.md");
+    ev = drain(w);
+    CHECK(hasEv(ev, EventKind::Moved, "notes.md", "notes.txt"));
+    CHECK(!hasEv(ev, EventKind::Modified, "notes.md"));
+
+    // 같은 묶음 안에서 만들고 바로 새 이름으로 바꿔도 이동
+    put(dir / "fast.txt", "f");
+    fs::rename(dir / "fast.txt", dir / "fast2.txt");
+    ev = drain(w);
+    CHECK(hasEv(ev, EventKind::Moved, "fast2.txt", "fast.txt"));
+    CHECK(!hasEv(ev, EventKind::Modified, "fast2.txt"));
+
+    // 오래된 파일을 이미 있는 파일 위로 옮기는 건 저장이 아니라 이동 (덮어쓰기)
+    put(dir / "old.txt", "o");
+    put(dir / "target.txt", "t");
+    drain(w);
+    usleep(2100 * 1000);
+    fs::rename(dir / "old.txt", dir / "target.txt");
+    ev = drain(w);
+    CHECK(hasEv(ev, EventKind::Moved, "target.txt", "old.txt"));
+
+    // 다른 폴더로 옮기기 = 이동
+    fs::create_directories(dir / "box");
+    put(dir / "item.txt", "i");
+    drain(w);
+    fs::rename(dir / "item.txt", dir / "box/item.txt");
+    CHECK(hasEv(drain(w), EventKind::Moved, "box/item.txt", "item.txt"));
+
+    // 이름을 바꾼 폴더 안 파일도 "이미 있던 파일"로 기억해서, 그 파일의 바꿔치기 저장은 수정으로 보인다
+    fs::rename(dir / "box", dir / "box2");
+    CHECK(hasEv(drain(w), EventKind::Moved, "box2", "box"));
+    put(dir / "box2/sedTMP2", "new");
+    fs::rename(dir / "box2/sedTMP2", dir / "box2/item.txt");
+    ev = drain(w);
+    CHECK(hasEv(ev, EventKind::Modified, "box2/item.txt"));
+    CHECK(!hasEv(ev, EventKind::Moved, "box2/item.txt", "box2/sedTMP2"));
+
     fs::remove(dir / "c.txt");
     CHECK(hasEv(drain(w), EventKind::Deleted, "c.txt"));
 

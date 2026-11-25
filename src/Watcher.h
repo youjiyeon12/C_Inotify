@@ -4,6 +4,7 @@
 #include <functional>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 enum class EventKind { Created = 0, Modified = 1, Deleted = 2, Moved = 3, Overflow = 4 };
@@ -38,6 +39,8 @@ private:
     bool addRecursive(const std::string& absDir, std::vector<FsEvent>* found);
     void renameDir(const std::string& fromAbs, const std::string& toAbs);
     void forgetDir(const std::string& abs);
+    void renameKnown(const std::string& fromRel, const std::string& toRel);
+    void forgetKnown(const std::string& rel);
     std::string rel(const std::string& abs) const;
     std::string absOf(const std::string& rel) const;
 
@@ -50,5 +53,7 @@ private:
     std::string lastCreated_;      // 생성 직후의 첫 닫기 판단용 (한 번 쓰면 비움)
     std::string lastCreatedEver_;  // 바꿔치기 저장 판단용
     std::unordered_map<std::string, std::chrono::steady_clock::time_point> replacing_;  // 백업 이름으로 옮겨진 원본
+    // 지금 있는 파일(상대 경로). 이름 바꾸기가 "이미 있던 파일을 덮어쓴 저장"인지 "그냥 이동"인지 가르는 데 쓴다
+    std::unordered_set<std::string> files_;
     std::chrono::steady_clock::time_point lastCreatedAt_;
 };
