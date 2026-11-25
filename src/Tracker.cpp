@@ -71,9 +71,13 @@ std::string Tracker::hashOf(const std::string& data) {
 
 bool Tracker::isBinary(const std::string& data) { return data.find('\0') != std::string::npos; }
 
-Snapshot Tracker::scan(std::map<std::string, std::string>* keep) const {
-    // shortcut: 매번 모든 파일을 다시 읽어 해시한다. 폴더가 수천 개 파일로 커지면 mtime 캐시를 붙일 것
+Snapshot Tracker::scan(bool keepBase) {
+    // 크기 · 수정 시각이 그대로인 파일은 다시 읽지 않고 지난번 해시를 쓴다 (git의 index와 같은 방식).
+    // 기준을 잡을 때(keepBase)는 내용을 담아 둬야 하니 kMaxKeep 이하 파일은 읽는다
     Snapshot snap;
+    std::unordered_map<std::string, CacheEntry> nextCache;
+    nextCache.reserve(cache_.size());
+    const auto now = fs::file_time_type::clock::now();
     std::error_code ec;
     const size_t cut = root_.generic_string().size() + 1;
     for (fs::recursive_directory_iterator it(root_, fs::directory_options::skip_permission_denied, ec), end;
@@ -90,18 +94,58 @@ Snapshot Tracker::scan(std::map<std::string, std::string>* keep) const {
         } else if (fs::is_directory(st)) {
             snap[rel + "/"] = "dir";
         } else if (fs::is_regular_file(st)) {  // shortcut: 장치 · 소켓 파일은 추적 안 함
-            if (auto data = readFile(it->path())) {
-                snap[rel] = hashOf(*data);
-                if (keep && data->size() <= kMaxKeep) (*keep)[rel] = std::move(*data);
+            std::error_code e1, e2;
+            uintmax_t size = fs::file_size(it->path(), e1);
+            auto mtime = fs::last_write_time(it->path(), e2);
+            if (e1 || e2) continue;  // 그 사이 지워짐
+            bool wantData = keepBase && size <= kMaxKeep;
+            auto c = cache_.find(rel);
+            if (!wantData && c != cache_.end() && c->second.settled && c->second.size == size &&
+                c->second.mtime == mtime) {
+                if (keepBase) baseSkipped_[rel] = NoBefore::TooBig;  // 기준을 잡는데 안 읽었다 = kMaxKeep보다 큼
+                snap[rel] = c->second.hash;
+                nextCache[rel] = std::move(c->second);
+                continue;
             }
+            std::string hash;
+            if (size > kHashLimit) {
+                // 아주 큰 파일(커지는 로그 등)은 매번 통째로 읽지 않는다. 크기나 수정 시각이 바뀌면 "고쳐짐"
+                hash = "meta:" + std::to_string(size) + ":" + std::to_string(mtime.time_since_epoch().count());
+            } else {
+                auto data = readFile(it->path());
+                if (!data) continue;
+                hash = hashOf(*data);
+                if (keepBase) {
+                    if (data->size() > kMaxKeep) baseSkipped_[rel] = NoBefore::TooBig;
+                    else if (isBinary(*data)) baseSkipped_[rel] = NoBefore::Binary;
+                    else if (keptBytes_ + data->size() > keepBudget_) baseSkipped_[rel] = NoBefore::OverBudget;
+                    else {
+                        keptBytes_ += data->size();
+                        baseData_[rel] = std::move(*data);
+                    }
+                }
+            }
+            if (keepBase && size > kHashLimit) baseSkipped_[rel] = NoBefore::TooBig;
+            // 방금(2초 안) 쓰인 파일은 같은 시각 안에 또 바뀌어도 시각이 안 달라질 수 있어 다음에도 다시 읽는다
+            bool settled = now - mtime > std::chrono::seconds(2);
+            snap[rel] = hash;
+            nextCache[rel] = {size, mtime, std::move(hash), settled};
         }
     }
+    cache_ = std::move(nextCache);  // 사라진 파일 정보는 버린다
     return snap;
 }
 
 void Tracker::resetBaseline() {
     baseData_.clear();
-    base_ = scan(&baseData_);
+    baseSkipped_.clear();
+    keptBytes_ = 0;
+    base_ = scan(true);
+}
+
+NoBefore Tracker::whyNoBefore(const std::string& rel) const {
+    auto it = baseSkipped_.find(rel);
+    return it == baseSkipped_.end() ? NoBefore::NotInBase : it->second;
 }
 
 std::vector<FileChange> Tracker::changes(const Snapshot& from, const Snapshot& to) {
@@ -117,7 +161,7 @@ std::vector<FileChange> Tracker::changes(const Snapshot& from, const Snapshot& t
     return out;
 }
 
-std::vector<FileChange> Tracker::status() const { return changes(base_, scan(nullptr)); }
+std::vector<FileChange> Tracker::status() { return changes(base_, scan(false)); }
 
 std::optional<std::string> Tracker::before(const std::string& rel) const {
     auto it = baseData_.find(rel);

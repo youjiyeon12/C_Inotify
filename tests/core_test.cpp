@@ -2,6 +2,7 @@
 #include <poll.h>
 #include <unistd.h>
 
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -90,9 +91,59 @@ int main() {
     put(dir / "big.bin", std::string(Tracker::kMaxKeep + 1, 'x'));
     r.resetBaseline();
     CHECK(!r.before("big.bin"));  // 너무 큰 파일은 내용을 안 담아 둔다
+    CHECK(r.whyNoBefore("big.bin") == NoBefore::TooBig);
     CHECK(!r.working("big.bin"));  // 지금 내용도 통째로 읽지 않는다 (화면 멈춤 방지)
     CHECK(r.working("a.txt").value_or("") == "one\n2\n");
+    r.resetBaseline();  // 두 번째부터는 안 읽고 넘어가는 길로 가도 이유는 같아야 한다
+    CHECK(r.whyNoBefore("big.bin") == NoBefore::TooBig);
     fs::remove(dir / "big.bin");
+    r.resetBaseline();
+
+    // 바이너리 파일은 줄 비교를 안 하니 기준 내용도 안 담아 둔다
+    put(dir / "img.bin", std::string("a\0b", 3));
+    r.resetBaseline();
+    CHECK(!r.before("img.bin"));
+    CHECK(r.whyNoBefore("img.bin") == NoBefore::Binary);
+    CHECK(r.before("a.txt"));  // 텍스트 파일은 그대로 담아 둔다
+
+    // 기준 내용은 전체 한도까지만 담아 둔다 (큰 폴더에서 메모리 폭주 방지)
+    r.setKeepBudget(5);
+    r.resetBaseline();
+    CHECK(r.keptBytes() <= 5);
+    CHECK(!r.before("a.txt"));  // 6바이트라 한도(5)를 넘음
+    CHECK(r.whyNoBefore("a.txt") == NoBefore::OverBudget);
+    CHECK(r.status().empty());  // 내용을 안 담아 둬도 바뀜 판단은 그대로
+    put(dir / "a.txt", "one\n3\n");
+    CHECK(has(r.status(), 'M', "a.txt"));
+    put(dir / "a.txt", "one\n2\n");
+    r.setKeepBudget(Tracker::kKeepBudget);
+    r.resetBaseline();
+    CHECK(r.before("a.txt").value_or("") == "one\n2\n");
+
+    // 오래전에 쓰인 파일은 다시 안 읽고 넘어가도, 내용이 바뀌면 고쳐짐으로 잡는다
+    put(dir / "old.txt", "1234");
+    fs::last_write_time(dir / "old.txt", fs::file_time_type::clock::now() - std::chrono::hours(1));
+    r.resetBaseline();
+    CHECK(r.status().empty());
+    CHECK(r.status().empty());
+    put(dir / "old.txt", "5678");
+    CHECK(has(r.status(), 'M', "old.txt"));
+
+    // 방금 쓴 파일을 같은 크기로 바로 또 써도(수정 시각이 같을 수 있음) 고쳐짐으로 잡는다
+    put(dir / "race.txt", "aaaa");
+    r.resetBaseline();
+    CHECK(r.status().empty());
+    put(dir / "race.txt", "bbbb");
+    CHECK(has(r.status(), 'M', "race.txt"));
+
+    // 아주 큰 파일은 통째로 읽지 않고 크기·시각으로 비교한다
+    put(dir / "huge.log", std::string(Tracker::kHashLimit + 1, 'h'));
+    r.resetBaseline();
+    CHECK(r.status().empty());
+    std::ofstream(dir / "huge.log", std::ios::app) << "more";
+    CHECK(has(r.status(), 'M', "huge.log"));
+
+    for (const char* f : {"img.bin", "old.txt", "race.txt", "huge.log"}) fs::remove(dir / f);
     r.resetBaseline();
 
     fs::create_symlink("a.txt", dir / "link.txt");  // 바로가기도 변경사항에 나온다
