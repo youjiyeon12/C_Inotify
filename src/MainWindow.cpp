@@ -622,7 +622,17 @@ void MainWindow::renderDiff(const std::string& rel, char status, const std::opti
                             const std::optional<std::string>& after) {
     QTextEdit* view = diffView_;
     if (!rel.empty() && rel.back() == '/') return showNote(view, status == 'A' ? "새 폴더" : "삭제된 폴더");
-    if (status != 'A' && !before) return showNote(view, "1MB가 넘는 파일은 줄 비교를 하지 않아요.");
+    if (status != 'A' && !before) {  // 기준 때 내용을 안 담아 둔 파일
+        switch (tracker_.whyNoBefore(rel)) {
+            case NoBefore::Binary: return showNote(view, "바이너리 파일이라 줄 비교를 하지 않아요.");
+            case NoBefore::OverBudget:
+                return showNote(view, QString("폴더가 커서 이 파일의 기준 내용은 담아 두지 못했어요. "
+                                              "(기준 내용은 모두 합쳐 %1MB까지만 기억해요)")
+                                          .arg(Tracker::kKeepBudget / (1024 * 1024)));
+            case NoBefore::TooBig: return showNote(view, "1MB가 넘는 파일은 줄 비교를 하지 않아요.");
+            default: return showNote(view, "줄 비교를 할 수 없는 파일이에요.");
+        }
+    }
     if (status != 'D' && !after) {  // 지금 파일이 너무 크거나, 그 사이 지워져서 못 읽음
         QFileInfo fi(QDir(q(tracker_.root())).filePath(q(rel)));
         return showNote(view, fi.exists() && fi.size() > qint64(Tracker::kMaxKeep)
